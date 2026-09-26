@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest==9.1.1
+pytest-cov==7.1.0
+ruff==0.16.8
+matplotlib==3.10.8   # only used to draw the forecast-vs-actual figure in the ML report

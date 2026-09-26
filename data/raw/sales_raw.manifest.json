@@ -1,0 +1,31 @@
+{
+  "base_rows": 25969,
+  "total_rows_written": 26437,
+  "injected_rejections": {
+    "missing_item_name": 52,
+    "missing_date": 52,
+    "invalid_date": 78,
+    "date_out_of_range": 26,
+    "missing_units": 65,
+    "invalid_units": 65,
+    "negative_units": 39,
+    "units_outlier": 26,
+    "missing_revenue": 65,
+    "invalid_revenue": 52,
+    "negative_revenue": 26,
+    "price_outlier": 26,
+    "zero_units_nonzero_revenue": 26,
+    "duplicate_row": 390,
+    "conflicting_duplicate": 78
+  },
+  "injected_repairs": {
+    "date_format_dmy": 779,
+    "money_symbols": 519,
+    "units_as_float": 260,
+    "item_name_case_whitespace": 1298,
+    "category_case_whitespace": 1039,
+    "missing_category": 130
+  },
+  "expected_rows_rejected": 1066,
+  "expected_rows_loaded": 25371
+}

@@ -1,0 +1,15 @@
+# Runtime dependencies (exact versions this project was developed and tested with).
+# Python 3.11+ required (pandas 3.x). Docker image uses Python 3.12.
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+pydantic==2.13.5
+pydantic-settings==2.15.0
+psycopg[binary,pool]==3.3.6
+psycopg-pool==3.3.3
+pandas==3.0.2
+numpy==2.4.4
+scikit-learn==1.8.0
+joblib==1.5.3
+sqlparse==0.6.0
+httpx==0.28.1
+python-dotenv==1.2.2
