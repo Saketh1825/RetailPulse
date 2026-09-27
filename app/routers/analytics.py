@@ -59,7 +59,9 @@ def top_items(
         GROUP BY i.id, i.name, i.category
         ORDER BY {order} DESC, i.name
         LIMIT %(limit)s
-        """, {**params, "limit": limit}).fetchall()
+        """, {**params, "limit": limit}).fetchall()  # noqa: S608 -- {order} is one of two fixed strings from
+        # the _ORDER whitelist above, never user input; {where} interpolates only SQL keywords/parameter
+        # placeholders built by _date_filter, whose actual values are always passed as bound params, not text.
 
 
 @router.get("/analytics/revenue-by-category", response_model=list[CategoryRevenue], summary="Revenue rollup by category")
@@ -73,7 +75,8 @@ def revenue_by_category(conn: Conn, start_date: date | None = None, end_date: da
         FROM sales s JOIN items i ON i.id = s.item_id{where}
         GROUP BY i.category
         ORDER BY revenue DESC
-        """, params).fetchall()
+        """, params).fetchall()  # noqa: S608 -- {where} interpolates only SQL keywords/parameter placeholders
+        # built by _date_filter; the actual date values are always passed as bound params, not raw text.
 
 
 @router.get("/analytics/monthly-revenue", response_model=list[MonthlyRevenue],

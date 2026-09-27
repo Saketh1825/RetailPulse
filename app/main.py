@@ -17,7 +17,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.config import get_settings
 from app.db import make_pool
 from app.models import Health
-from app.routers import analytics, forecast
+from app.routers import analytics, forecast, nl_query
+from app.security import RateLimiter
 
 log = logging.getLogger("app")
 STATIC = Path(__file__).parent / "static"
@@ -34,6 +35,7 @@ async def lifespan(app: FastAPI):
     app.state.ro_pool = make_pool(
         s.readonly_database_url, name="ro", max_size=4,
         options=f"-c statement_timeout={s.nl_statement_timeout_ms} -c default_transaction_read_only=on")
+    app.state.query_rate_limiter = RateLimiter(limit=s.query_rate_limit_per_minute)
     yield
     app.state.rw_pool.close()
     app.state.ro_pool.close()
@@ -96,6 +98,7 @@ def create_app() -> FastAPI:
 
     app.include_router(analytics.router)
     app.include_router(forecast.router)
+    app.include_router(nl_query.router)
     if (STATIC / "index.html").exists():
         @app.get("/", include_in_schema=False)
         def index():

@@ -1,464 +1,241 @@
 # RetailPulse
 
-### Retail Data Pipeline & Demand Forecasting Platform
+**Retail Data Pipeline & Demand Intelligence Platform**
 
-RetailPulse is an end-to-end retail analytics backend that transforms raw sales data into a validated PostgreSQL database, provides SQL-backed analytics through REST APIs, and generates item-level demand forecasts using machine learning.
+RetailPulse turns messy raw retail sales exports into a validated PostgreSQL database, serves SQL-backed analytics and a per-item demand forecast over a REST API, and answers plain-English questions about the data through a safety-constrained natural-language-to-SQL interface.
 
-The project demonstrates a complete data workflow:
+Built as a final-year B.Tech project. Every claim below is backed by a test or a measured, reproducible number; see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full build plan and design rationale, and [`docs/NL_SQL_SECURITY.md`](docs/NL_SQL_SECURITY.md) for the NL-to-SQL threat model.
 
-**Data Generation → ETL → Validation → PostgreSQL → Analytics → Forecasting → REST API**
-
-> **Status:** Core ETL, database, analytics API, forecasting, testing, and GitHub setup are complete. Natural-language-to-SQL functionality is planned for a future phase.
+**Status:** All nine build phases complete except the two pieces that need something only you can provide: a real LLM API key (for an honest NL-to-SQL correctness score) and a Docker daemon (this was built in a sandbox without one, so the image is written and reviewed but not build-tested). See [Roadmap](#roadmap).
 
 ---
 
-## 🚀 Features
+## What it does
 
-- Automated retail sales ETL pipeline
-- Data validation and cleaning
-- Duplicate and conflicting-record detection
-- Missing-value and outlier handling
-- Rejected-record tracking with machine-readable reasons
-- PostgreSQL data storage
-- Retail sales analytics
-- Revenue-by-category analysis
-- Top-product analysis
-- Monthly revenue and month-over-month growth
-- Item-level demand forecasting
-- Forecast evaluation against baseline models
-- FastAPI REST APIs
-- Swagger/OpenAPI documentation
-- Automated testing with pytest
-- Reproducible synthetic dataset generation
+```
+Raw sales CSV -> Validate & clean -> PostgreSQL -> SQL analytics + demand forecast + NL query -> REST API
+```
 
----
+- **ETL** -- cleans raw CSVs (bad dates, missing values, duplicates, price/unit outliers, inconsistent casing) into a normalized schema. Nothing is silently dropped: every rejected row keeps one machine-readable reason; every run is auditable.
+- **Analytics** -- top-selling items, revenue by category, monthly revenue with month-over-month growth (SQL window functions), and a data-quality report -- all served over FastAPI.
+- **Forecasting** -- one Linear Regression model per item, evaluated on a strictly chronological holdout against two honest baselines (not just reported in isolation).
+- **NL-to-SQL** -- a question in English becomes SQL via one LLM call, independently validated (SELECT-only, table whitelist, forced `LIMIT`), and executed under a database role that cannot write even if every other check fails. Proven directly against real PostgreSQL, not just unit-tested -- see [below](#nl-to-sql-defense-in-depth).
 
-## 🏗️ Architecture
+## Why these choices
 
-```text
-                    Raw Sales CSV
-                         │
-                         ▼
-               ┌──────────────────┐
-               │   Extract Data   │
-               └────────┬─────────┘
-                        │
-                        ▼
-               ┌──────────────────┐
-               │ Validate & Clean │
-               └────────┬─────────┘
-                        │
-              ┌─────────┴─────────┐
-              │                   │
-              ▼                   ▼
-       Rejected Records       Clean Data
-              │                   │
-              ▼                   ▼
-      Quality Reports       PostgreSQL
-                                  │
-                     ┌────────────┴────────────┐
-                     │                         │
-                     ▼                         ▼
-               Analytics API             Forecasting
-                                             │
-                                             ▼
-                                      Linear Regression
-                                             │
-                                             ▼
-                                       Forecast API
-🧰 Tech Stack
-Category	Technology
-Programming Language	Python
-Data Processing	Pandas
-Database	PostgreSQL
-API Framework	FastAPI
-Machine Learning	Scikit-learn
-Forecasting Model	Linear Regression
-Database Driver	psycopg
-Testing	Pytest
-API Documentation	Swagger / OpenAPI
-Version Control	Git & GitHub
-📊 ETL Pipeline
+- **PostgreSQL**, not a toy database: real constraints, foreign keys, and -- critically -- real per-role permissions, which is what makes the NL-to-SQL safety design more than an app-code promise.
+- **One Linear Regression per item**, not a model bake-off: small dataset, full interpretability, and a model whose coefficients you can actually explain in a viva.
+- **No Spark / Kafka / Airflow / Kubernetes / LangChain / multi-agent AI.** The problem doesn't need them, and a smaller system you can defend end-to-end is worth more than a large one you can't.
 
-RetailPulse processes raw retail sales data through a multi-stage ETL pipeline.
+## Quick look
 
-1. Extract
+`GET /analytics/top-items?limit=3` on the sample dataset:
 
-Reads raw sales data from CSV files.
+```json
+[
+  { "rank": 1, "item_id": 20, "name": "Sourdough Loaf",    "category": "Bakery", "units_sold": 51757,  "revenue": 225887.79 },
+  { "rank": 2, "item_id": 13, "name": "Multigrain Bread",  "category": "Bakery", "units_sold": 82916,  "revenue": 205804.05 },
+  { "rank": 3, "item_id": 24, "name": "Whole Milk 1L",     "category": "Dairy",  "units_sold": 157990, "revenue": 204708.57 }
+]
+```
 
-2. Validate
+`GET /forecast/1` (Blueberry Muffin) -- a real, reproduced result, not a cherry-picked one:
 
-The pipeline checks for:
-
-Missing values
-Invalid dates
-Invalid revenue
-Negative quantities
-Zero-unit/non-zero-revenue records
-Duplicate records
-Conflicting duplicates
-Quantity outliers
-Price outliers
-3. Clean & Repair
-
-The pipeline performs safe transformations such as:
-
-Date-format normalization
-Currency-symbol removal
-Numeric unit conversion
-Whitespace and case normalization
-Missing-category handling
-4. Reject
-
-Invalid records are separated from valid records and stored with their rejection reason.
-
-5. Load
-
-Validated records are loaded into PostgreSQL.
-
-🧹 Data Quality Results
-
-Latest successful ETL run on the generated sample dataset:
-
-Metric	Result
-Rows read	26,437
-Clean rows	25,371
-Rows rejected	1,066
-Rejection rate	4.03%
-Items loaded	24
-Sales rows loaded	25,371
-Total units	1,095,944
-Total revenue	2,901,538.74
-Date range	2022-01-01 → 2024-12-31
-Repairs performed
-Item-name whitespace/case normalization
-Category normalization
-Date-format repair
-Currency-symbol removal
-Units stored as floating-point values
-Missing-category handling
-Rejection examples
-Duplicate rows
-Conflicting duplicates
-Invalid dates
-Missing dates
-Missing item names
-Missing units
-Invalid units
-Missing revenue
-Invalid revenue
-Negative units
-Negative revenue
-Outlier units
-Outlier prices
-
-The pipeline keeps rejected records and their reasons instead of silently dropping invalid data.
-
-📈 Analytics
-
-RetailPulse exposes SQL-backed analytics through FastAPI.
-
-Available analytics
-Overall sales summary
-Top items by revenue
-Top items by units sold
-Revenue by category
-Category revenue share
-Monthly revenue
-Month-over-month revenue growth
-Latest ETL/data-quality report
-Example
-GET /analytics/summary
-
-Example response:
-
+```json
 {
-  "items": 24,
-  "sales_rows": 25371,
-  "first_date": "2022-01-01",
-  "last_date": "2024-12-31",
-  "total_units": 1095944,
-  "total_revenue": 2901538.74
+  "item_id": 1, "item_name": "Blueberry Muffin", "category": "Bakery", "horizon_days": 28,
+  "model": {
+    "model_type": "LinearRegression",
+    "train_period": "2022-09-01 to 2024-12-03",
+    "holdout_period": "2024-12-04 to 2024-12-31",
+    "holdout_mae_units_per_day": 5.50,
+    "holdout_wape_pct": 13.71,
+    "baseline_seasonal_naive_mae": 8.29,
+    "baseline_mean_mae": 8.21,
+    "beats_seasonal_naive": true
+  },
+  "forecast": [{ "date": "2025-01-01", "predicted_units": 34.93 }, "... 27 more days"],
+  "caveat": "Statistical estimate from a per-item Linear Regression (weekly lags, weekday, trend, annual seasonality). It cannot anticipate promotions, stock-outs, price changes or one-off events."
 }
-Top Items Example
-GET /analytics/top-items?limit=10&metric=revenue
+```
 
-Example results from the sample dataset:
+![Forecast vs. actual sales for Laundry Detergent 2L, showing the last 90 days of real sales and the next 28 days forecast](docs/img/forecast_vs_actual.png)
 
-Rank	Product	Category	Revenue
-1	Sourdough Loaf	Bakery	225,887.79
-2	Multigrain Bread	Bakery	205,804.05
-3	Whole Milk 1L	Dairy	204,708.57
-🤖 Demand Forecasting
+`POST /query {"question": "Which 3 Bakery items made the most revenue?"}` -- a real response (the LLM call is stubbed with a fixed SQL string for this example, since this build environment has no LLM key; the validator, executor, and database are all real):
 
-RetailPulse generates item-level demand forecasts using Linear Regression.
+```json
+{
+  "question": "Which 3 Bakery items made the most revenue?",
+  "sql": "SELECT i.name, SUM(s.revenue) AS revenue FROM items i JOIN sales s ON s.item_id = i.id WHERE i.category = 'Bakery' GROUP BY i.name ORDER BY revenue DESC LIMIT 4",
+  "columns": ["name", "revenue"],
+  "rows": [["Sourdough Loaf", "225887.79"], ["Multigrain Bread", "205804.05"], ["Butter Croissant", "152584.50"]],
+  "row_count": 3, "truncated": true, "limit_applied": 3,
+  "timings": { "llm_ms": 1, "validate_ms": 6, "db_ms": 127, "total_ms": 133 },
+  "notes": []
+}
+```
 
-The forecasting pipeline uses historical sales patterns including:
+And what happens when the model is asked (or tricked into trying) to destroy data:
 
-Weekly lag features
-Weekday information
-Trend
-Annual seasonality
+```json
+// POST /query {"question": "delete all sales records"}  ->  422
+{ "error": { "code": "http_error", "message": "query rejected: only SELECT is allowed, got statement type 'DELETE'" } }
+```
 
-The model is evaluated using a chronological holdout instead of randomly splitting time-series data.
+## Architecture
 
-Baseline Models
+```mermaid
+flowchart LR
+    A[Raw sales CSV] --> B[Extract]
+    B --> C[Validate + Clean]
+    C -->|rejected rows + reason| R[(rejected/*.csv + etl_runs audit)]
+    C -->|clean rows| D[Load - idempotent upsert]
+    D --> E[(PostgreSQL: items, sales, forecasts)]
+    E --> F[FastAPI analytics]
+    E --> G[LinearRegression per item]
+    G --> E
+    G --> H[FastAPI /forecast]
+    Q[NL question] --> L[LLM: question to SQL] --> V[Validator: SELECT-only, whitelist, LIMIT] --> X[Read-only DB role + timeout] --> E
+```
 
-The forecasting model is compared against:
+Everything above is built and tested. Full rationale, the ER diagram, and the phase-by-phase build log with validation gates are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-Seasonal Naive
-Recent Mean
-Latest Training Results
-Metric	Linear Regression	Seasonal Naive	Recent Mean
-Macro MAE	7.6683	9.7947	10.0007
-Rolling-Origin Evaluation
-Windows evaluated: 92
+## Database schema
 
-Model MAE:             6.3308
-Seasonal Naive MAE:    8.5669
-Recent Mean MAE:       9.4838
+```
+items (id, name, category)
+sales (id, item_id -> items, sale_date, units_sold, revenue)
+    UNIQUE (item_id, sale_date)   -- one row per item per day; makes reloads idempotent
+forecasts (id, item_id -> items, forecast_date, predicted_units, generated_at)
+forecast_models (item_id -> items, model_type, train/test window, test_mae, test_wape, baselines, coefficients)
+etl_runs (id, source_file, status, rows_read/rejected/loaded, rejection_summary, repair_summary)
+nl_query_log (id, question, generated_sql, executed_sql, status, reject_reason, row_count, timings)
+```
 
-Windows beating Seasonal Naive: 90 / 92
+A dedicated `retailpulse_readonly` PostgreSQL role holds `SELECT` on exactly `items`, `sales`, `forecasts` -- nothing else, no writes, `statement_timeout`, and `idle_in_transaction_session_timeout`, all enforced by Postgres itself, not application code. See `db/schema.sql` and `db/readonly_grants.sql`.
 
-The training pipeline successfully trained models for 23 active items. One inactive item was skipped.
+## NL-to-SQL: defense in depth
 
-Forecast API
-GET /forecast/{item_id}
+Four independent layers stand between a typed question and the database -- full threat model in [`docs/NL_SQL_SECURITY.md`](docs/NL_SQL_SECURITY.md):
 
-Example:
+1. **Constrained prompt** (`app/nl_sql/prompt.py`) -- exact schema, SELECT-only instructions. A quality measure, not a security boundary.
+2. **Independent validator** (`app/nl_sql/validator.py`) -- fails closed; rejects anything not a single SELECT/CTE, any non-whitelisted table, comments, dangerous functions (`pg_sleep`, `pg_read_file`, `dblink`, ...), comma-joins; forces a `LIMIT`. 57 adversarial tests.
+3. **Database-enforced read-only role** -- `retailpulse_readonly` can only `SELECT` from three tables, and every session is read-only by role default.
+4. **Resource limits** -- statement timeout, idle-transaction timeout, row cap, question-length cap, optional API key, rate limiting.
 
-GET /forecast/20
+The strongest evidence isn't the validator's unit tests -- it's that layers 3 and 4 were proven **with no application code involved at all**: connecting directly as the read-only role and issuing a raw `DELETE FROM sales` is refused by PostgreSQL itself (`ReadOnlySqlTransaction`), and `SELECT pg_sleep(2)` against a 150ms timeout is killed by Postgres (`QueryCanceled`). Even a validator with a bug, or application code that forgot to call it, cannot turn into a write or a runaway query.
 
-The API returns:
+## API
 
-Item information
-Forecast horizon
-Model type
-Training period
-Holdout period
-Holdout MAE
-Holdout WAPE
-Baseline metrics
-Future predicted demand
-Forecast limitations
-Forecast Limitation
+All endpoints return JSON; errors use one envelope: `{"error": {"code", "message", "details"}}`.
 
-The forecast is a statistical estimate based on historical sales patterns.
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/health` | Liveness + both database roles reachable |
+| GET | `/analytics/summary` | Headline numbers for the loaded data |
+| GET | `/analytics/top-items` | Top items by revenue or units, with date filters |
+| GET | `/analytics/revenue-by-category` | Revenue rollup with share % |
+| GET | `/analytics/monthly-revenue` | Monthly revenue + month-over-month growth |
+| GET | `/items` | List items (to find an `item_id`) |
+| GET | `/data-quality/latest` | What the last ETL run rejected and repaired, and why |
+| GET | `/forecast/{item_id}` | Forecast + holdout accuracy + baseline comparison for one item |
+| POST | `/query` | Natural-language question -> validated, read-only SQL result |
 
-It does not automatically account for:
+Interactive docs (Swagger UI) are served at `/docs` once the app is running.
 
-Promotions
-Stock-outs
-Price changes
-One-off events
-Unexpected market changes
+## Setup
 
-The included dataset is synthetic, so the reported accuracy demonstrates the implemented training and evaluation pipeline rather than guaranteed real-world retail accuracy.
+**Prerequisites:** Python 3.11+, PostgreSQL 16 (a superuser-equivalent connection to create the app's roles/database).
 
-🔌 REST API
+```bash
+git clone <this-repo-url> retailpulse && cd retailpulse
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt        # add -dev for pytest/ruff; requirements.txt alone is enough to run the API
 
-RetailPulse is built using FastAPI.
+cp .env.example .env                       # then edit .env with real passwords (never commit .env)
+python -m scripts.init_db                  # creates the schema + the read-only role, from DATABASE_URL / READONLY_DATABASE_URL
 
-Endpoints
-Method	Endpoint	Purpose
-GET	/health	Application and database health
-GET	/items	List available items
-GET	/analytics/summary	Overall sales metrics
-GET	/analytics/top-items	Top items by revenue/units
-GET	/analytics/revenue-by-category	Category revenue analysis
-GET	/analytics/monthly-revenue	Monthly revenue trends
-GET	/data-quality/latest	Latest ETL quality report
-GET	/forecast/{item_id}	Item-level demand forecast
+python -m scripts.generate_sample_data     # writes data/raw/sales_raw.csv (a synthetic 3-year dataset with known injected defects)
+python -m etl.pipeline --input data/raw/sales_raw.csv --json   # clean + load; prints a JSON run report
 
-Interactive API documentation is available through Swagger UI:
+python -m app.forecasting.train            # trains + evaluates one LinearRegression per item, writes artifacts/metrics.json
 
-http://127.0.0.1:8000/docs
-🗄️ Database
+uvicorn app.main:app --reload              # -> http://127.0.0.1:8000/docs
+```
 
-RetailPulse uses PostgreSQL as its primary database.
+To use `/query` for real (not the `FakeLLMClient` shown above), set `LLM_API_KEY` in `.env` -- the default `LLM_BASE_URL`/`LLM_MODEL` point at Groq's OpenAI-compatible endpoint, but any OpenAI-compatible API works.
 
-Main Tables
-items
-sales
-forecasts
-forecast_models
-etl_runs
-Relationships
-items
- ├── sales
- ├── forecasts
- └── forecast_models
+To use a real (non-synthetic) dataset instead of the generator: rename/aggregate it to the five required columns (`sale_date`, `item_name`, `category`, `units_sold`, `revenue`, one row per product per day) and run `python -m etl.pipeline --input your_file.csv`. See [`data/README.md`](data/README.md) for the exact column meanings and what to re-check (date format, outlier thresholds) before trusting real-data results.
 
-etl_runs
- └── ETL execution and data-quality information
+### Docker
 
-The database stores both retail data and forecasting results, allowing analytics and forecast APIs to operate from the same backend.
+```bash
+docker compose up -d db
+docker compose run --rm app python -m scripts.init_db
+docker compose run --rm app python -m scripts.generate_sample_data
+docker compose run --rm app python -m etl.pipeline --input data/raw/sales_raw.csv --json
+docker compose run --rm app python -m app.forecasting.train
+docker compose up -d app       # -> http://localhost:8000/docs
+```
 
-🧪 Testing
+**Honest note:** the `Dockerfile`/`docker-compose.yml` were written carefully and reviewed line-by-line against the actual app code (paths, the non-root user, the healthcheck, volume mounts), but this project was built in a sandbox with no Docker daemon, so they have not actually been build-tested. Run `docker compose build` yourself and treat the first run as the real test -- if something's off, it's most likely a path or an env var name.
 
-The project includes automated tests covering ETL, forecasting, and API functionality.
+## Testing
 
-Latest verified local test run:
+```bash
+pytest              # 209 tests: unit tests always run; integration tests need a reachable PostgreSQL
+```
 
-56 passed
-38 skipped
-0 failed
+- **36** ETL validation + **16** ETL<->PostgreSQL integration tests -- including the strongest check in the suite: the sample-data generator records exactly how many rows of each defect it injected, and the test asserts the ETL's rejection and repair counts match that ground truth *exactly*, reason by reason
+- **17** API tests (analytics + forecast), **28** forecasting tests (features, chronological split, baselines, metric reproducibility)
+- **57** NL-to-SQL validator tests -- every destructive statement type, dangerous functions, non-whitelisted tables, comment-based tricks, missing/oversized `LIMIT`, gibberish input
+- **5** executor tests, including the permission-denied and timeout paths run against the *real* read-only role
+- **17** LLM-client + prompt-builder tests (no network call -- response parsing and error handling only)
+- **14** `/query` API integration tests: success + audit log, rejection + audit log, LLM failure, API key enforcement, rate limiting, **and two tests that bypass the app entirely** to prove the database itself refuses writes and enforces the timeout
+- **3** evaluation-harness sanity tests, **16** security/config unit tests
 
-The skipped tests are integration tests that require a separately reachable PostgreSQL test database.
+Integration tests run only against a database whose name ends in `_test` (a safety check in `tests/conftest.py`), so they can never touch a real/demo database by mistake. They're skipped, not failed, when no PostgreSQL is reachable.
 
-No test failures were reported in the verified run.
+## Honest limitations
 
-⚙️ Local Setup
-Prerequisites
-Python 3.11+
-PostgreSQL
-Git
-1. Clone the Repository
-git clone https://github.com/Saketh1825/RetailPulse.git
-cd RetailPulse
-2. Create a Virtual Environment
-Windows
-python -m venv .venv
-.venv\Scripts\activate
-Linux/macOS
-python -m venv .venv
-source .venv/bin/activate
-3. Install Dependencies
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
-4. Configure Environment Variables
+- The sample dataset is **synthetic**, generated with known weekly/yearly seasonality -- the forecast numbers above prove the training-and-evaluation *pipeline* is correct, not that this accuracy holds on real retail data.
+- Linear Regression cannot model promotions, stock-outs, price changes, or one-off events -- see the `caveat` field the API returns with every forecast.
+- The NL-to-SQL feature has not been evaluated against a real LLM -- the validator, executor, and API are fully tested with a `FakeLLMClient` standing in for the model, but the actual correctness rate (via `python -m scripts.evaluate_nl_sql` on the 20 labeled questions in `evaluation/`) needs your API key to produce a real number.
+- `sqlparse` is a lexical tool, not a full SQL parser -- the validator is a defensible, tested, fail-closed check, not a formally verified one. That's exactly why the database-level read-only role exists as an independent backstop.
+- The rate limiter is a single-process in-memory counter -- correct for the single-instance deployment this project targets, but would need a shared store (e.g. Redis) behind more than one worker or replica.
+- Docker is written and reviewed but not build-tested (no Docker daemon in the build environment).
 
-Create a .env file based on .env.example.
+Full limitations and the phase-by-phase validation gates are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-Add your local PostgreSQL connection details.
+## Roadmap
 
-.env contains local credentials and must never be committed to GitHub.
+- [x] Phase 4 -- NL-to-SQL: constrained prompt, `sqlparse`-based validator, executor, `/query` endpoint
+- [x] Phase 5 -- Hardening: optional API key, rate limiting, full query audit log
+- [x] Phase 6 -- Evaluation harness for 20 labeled NL-to-SQL questions (sanity-tested; needs your LLM key for a real score)
+- [x] Phase 7 -- Dockerfile + docker-compose (written, reviewed, not build-tested -- no Docker in the build sandbox)
+- [x] Phase 8 -- README, real forecast-vs-actual figure, ER diagram, NL-to-SQL security design doc
+- [x] Phase 9 -- Resume bullets and interview prep (see [`docs/RESUME_AND_INTERVIEW.md`](docs/RESUME_AND_INTERVIEW.md))
+- [ ] Run `python -m scripts.evaluate_nl_sql` with a real `LLM_API_KEY` and record the actual correctness rate here
+- [ ] Build-test the Docker image and deploy to a public URL
 
-5. Initialize the Database
-python -m scripts.init_db
-6. Generate Sample Data
-python -m scripts.generate_sample_data
+## Project layout
 
-This generates a reproducible synthetic retail dataset.
+```
+app/            FastAPI app: main.py, config.py, db.py, models.py, security.py
+  routers/      analytics.py, forecast.py, nl_query.py
+  forecasting/  data.py, features.py, metrics.py, train.py, predict.py
+  nl_sql/       prompt.py, validator.py, llm_client.py, executor.py
+etl/            extract.py, clean.py, transform.py, load.py, pipeline.py
+db/             schema.sql, readonly_grants.sql
+scripts/        init_db.py, generate_sample_data.py, evaluate_nl_sql.py, make_report_figures.py
+data/raw/       sample dataset + ground-truth manifest
+evaluation/     nl_sql_questions.jsonl (20 labeled questions)
+artifacts/      metrics.json (kept as evidence); models/ is regenerable, git-ignored
+docs/           ARCHITECTURE.md, NL_SQL_SECURITY.md, RESUME_AND_INTERVIEW.md, img/
+Dockerfile, docker-compose.yml, .dockerignore, LICENSE
+tests/          209 tests
+```
 
-7. Run the ETL Pipeline
-python -m etl.pipeline --input data\raw\sales_raw.csv
-8. Train Forecasting Models
-python -m app.forecasting.train
-9. Start the API
-uvicorn app.main:app --reload
+## Tech stack
 
-Open Swagger:
-
-http://127.0.0.1:8000/docs
-📁 Project Structure
-retailpulse/
-│
-├── app/
-│   ├── forecasting/
-│   ├── routers/
-│   ├── db.py
-│   ├── models.py
-│   └── main.py
-│
-├── data/
-│   ├── raw/
-│   └── rejected/
-│
-├── db/
-│   ├── schema.sql
-│   └── grants.sql
-│
-├── etl/
-│   ├── clean.py
-│   ├── extract.py
-│   ├── load.py
-│   ├── pipeline.py
-│   └── transform.py
-│
-├── scripts/
-│   ├── generate_sample_data.py
-│   └── init_db.py
-│
-├── tests/
-│
-├── artifacts/
-│   └── metrics.json
-│
-├── docs/
-│   └── ARCHITECTURE.md
-│
-├── .env.example
-├── .gitignore
-├── pyproject.toml
-├── pytest.ini
-├── requirements.txt
-└── requirements-dev.txt
-🔐 Security & Configuration
-
-Sensitive configuration is excluded from version control.
-
-The project ignores:
-
-.env
-*.pem
-.venv/
-__pycache__/
-.pytest_cache/
-
-Database credentials and API keys should always be stored in environment variables.
-
-📌 Project Status
-Completed
- PostgreSQL database setup
- Synthetic data generation
- ETL pipeline
- Data validation and cleaning
- Rejected-record handling
- Analytics APIs
- Data-quality API
- Forecasting pipeline
- Forecast API
- Automated tests
- GitHub repository
-Planned
- Natural-language-to-SQL interface
- Production deployment
- Dockerization
- Hosted PostgreSQL
- Optional analytics dashboard
- CI/CD automation
-🛣️ Future Improvements
-
-Potential future improvements include:
-
-Natural-language-to-SQL with strict read-only database controls
-Docker-based deployment
-Hosted PostgreSQL
-Automated CI/CD testing
-Interactive analytics dashboard
-Additional forecasting approaches
-Evaluation using real-world retail datasets
-Production monitoring and observability
-🎯 Design Philosophy
-
-RetailPulse intentionally avoids unnecessary infrastructure and complexity.
-
-The project does not depend on technologies such as Spark, Kafka, Airflow, Kubernetes, or multi-agent frameworks.
-
-The goal is to build a system whose complete data flow can be understood, tested, explained, and defended end-to-end.
-
-👨‍💻 Author
-
-Saketh Goudi
-
-B.Tech — Computer Science (Data Science)
-
-GitHub: @Saketh1825
-
-📄 License
-
-This project is currently intended as a portfolio and educational project.
-
-
-**This is the one to paste.** After saving it as `README.md`, don't change anything else yet.
+Python, pandas, PostgreSQL, FastAPI, scikit-learn (Linear Regression), psycopg3, sqlparse, httpx, pytest, Docker, Git

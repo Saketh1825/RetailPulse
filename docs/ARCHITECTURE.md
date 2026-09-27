@@ -11,7 +11,7 @@ RetailPulse does four things, in order:
 1. **Cleans** raw sales CSVs and loads them into a normalized PostgreSQL schema — and shows exactly what it rejected and why.
 2. **Analyzes** the data through SQL-backed REST endpoints.
 3. **Forecasts** daily demand per item with one explainable model (Linear Regression).
-4. 🔜 **Answers plain-English questions** by translating them to SQL, then running that SQL under multiple safety layers.
+4. **Answers plain-English questions** by translating them to SQL, then running that SQL under four independent safety layers.
 
 ## 2. Architecture
 
@@ -26,10 +26,10 @@ flowchart LR
     E --> G[Forecast training<br/>LinearRegression per item]
     G --> E
     G --> H[FastAPI /forecast/id]
-    Q[Natural-language question] -.-> L[LLM: question → SQL<br/>single call] -.-> V[Validator<br/>SELECT-only · table whitelist · LIMIT] -.-> X[Read-only DB role<br/>+ statement_timeout] -.-> E
+    Q[Natural-language question] --> L[LLM: question → SQL<br/>single call] --> V[Validator<br/>SELECT-only · table whitelist · LIMIT] --> X[Read-only DB role<br/>+ statement_timeout] --> E
 ```
 
-Solid arrows are built (✅). Dotted arrows are the NL-to-SQL path (🔜, Phase 4).
+Everything above is built and tested — nothing in this diagram is still a plan.
 
 ## 3. Build plan and validation gates
 
@@ -39,12 +39,12 @@ Solid arrows are built (✅). Dotted arrows are the NL-to-SQL path (🔜, Phase 
 | 1 | Synthetic messy dataset + ETL (extract → validate → clean → load) | ETL output matches the generator's ground-truth manifest exactly | ✅ |
 | 2 | FastAPI app + SQL analytics endpoints | API tests pass against real PostgreSQL | ✅ |
 | 3 | Per-item Linear Regression forecast, chronological evaluation, baselines | Metrics reproduce on re-run; beats naive baselines honestly | ✅ |
-| 4 | NL-to-SQL: prompt, validator, read-only execution, `/query` | Adversarial suite: 100% of destructive/invalid inputs rejected | 🔜 next |
-| 5 | Hardening: API key, rate limit, query audit log, safe errors | Tests for each control | 🔜 |
-| 6 | NL-to-SQL evaluation on ~20+ labeled questions | Run with a real LLM key; report actual correctness rate | 🔜 (needs your key) |
-| 7 | Deployment (Docker + hosted Postgres) + live-demo check | Health check + demo workflow pass on the deployed URL | 🔜 |
-| 8 | README, screenshots, ER/architecture diagrams, testing docs | Fresh-clone setup works from README alone | 🔜 |
-| 9 | Resume bullets + interview pack | Every number traceable to a measured result | 🔜 |
+| 4 | NL-to-SQL: prompt, validator, executor, `/query` | Adversarial suite: 100% of destructive/invalid inputs rejected | ✅ |
+| 5 | Hardening: API key, rate limit, query audit log, safe errors | Tests for each control | ✅ |
+| 6 | NL-to-SQL evaluation harness + 20 labeled questions | Harness sanity-tested (scores 100% when fed its own reference SQL) | ✅ harness; 🔜 real LLM score (needs your key) |
+| 7 | Deployment (Dockerfile + docker-compose) | Written and reviewed | ✅ written; 🔜 not build-tested (no Docker daemon in the build sandbox) |
+| 8 | README, real screenshots/figures, security design doc | Fresh-clone setup works from README alone | ✅ |
+| 9 | Resume bullets + interview pack | Every number traceable to a measured result | ✅ |
 
 ## 4. ETL design ✅
 
@@ -128,45 +128,62 @@ The read-only role can `SELECT` from exactly `items`, `sales`, `forecasts`. The 
 
 **Honest caveat:** the dataset is synthetic and was generated with weekly and yearly seasonality, which is exactly what these features capture. These numbers show the pipeline and evaluation are correct; they are **not** evidence of real-world forecast accuracy. Re-run on a real retail dataset before making any accuracy claim.
 
-## 7. NL-to-SQL design 🔜 (Phase 4)
+## 7. NL-to-SQL design ✅
 
-One LLM call per question, no framework, no agents. Four independent layers — a failure of one must not be fatal:
+One LLM call per question, no framework, no agents. Four independent layers — a failure of one must not be fatal. Full threat model, exact rule list, and what's verified directly against real PostgreSQL (not mocked) is in [`docs/NL_SQL_SECURITY.md`](NL_SQL_SECURITY.md); summary:
 
 | Layer | Where | What it stops |
 |---|---|---|
 | 1. Constrained prompt | `app/nl_sql/prompt.py` | Gives the model the exact schema and "output one SELECT only" — reduces bad output, **not** a security control |
-| 2. Validator | `app/nl_sql/validator.py` | Parses with `sqlparse`; rejects anything that isn't a single SELECT/WITH-SELECT, any non-whitelisted table, system catalogs, dangerous functions (`pg_sleep`, `pg_read_file`, `dblink`, …), comments and multiple statements; forces a `LIMIT` cap |
+| 2. Validator | `app/nl_sql/validator.py` | Parses with `sqlparse`; rejects anything that isn't a single SELECT/WITH-SELECT, any non-whitelisted table, system catalogs, dangerous functions (`pg_sleep`, `pg_read_file`, `dblink`, …), comments, comma-joins and multiple statements; forces a `LIMIT` cap |
 | 3. Read-only DB role | Postgres | Refuses any write/DDL regardless of app bugs; also `default_transaction_read_only` |
-| 4. Resource limits | Postgres + app | `statement_timeout` (5s), row cap, question length cap, rate limit, optional API key |
+| 4. Resource limits | Postgres + app | `statement_timeout` (5s) and `idle_in_transaction_session_timeout`, both set at the role level; row cap; question length cap; rate limit; optional API key |
 
-Safe errors: the API returns a clear reason ("query rejected: references non-whitelisted table") and never leaks stack traces or raw database errors. Every attempt (accepted or rejected) is written to `nl_query_log`.
+**Proven, not just unit-tested:** `tests/test_nl_query_api.py` and `tests/test_nl_executor.py` connect directly as the `retailpulse_readonly` role — with no validator, no app code, nothing in between — and issue a raw `DELETE`/`INSERT` (refused by Postgres with `ReadOnlySqlTransaction`) and `SELECT pg_sleep(2)` with a 150ms timeout (cancelled with `QueryCanceled`). That is the layer-3/4 backstop working independently of anything layer 1-2 does.
 
-**Not claimed:** that this is perfectly secure. Validators can have gaps, which is why the database itself is a separate layer; and a read-only role still cannot stop an expensive read, which is why the timeout and row cap exist.
+The endpoint (`POST /query`, `app/routers/nl_query.py`) wires prompt → LLM client → validator → executor → response, and writes every attempt (accepted, rejected, LLM error, or execution error) to `nl_query_log` via the normal read/write role, whether or not it succeeded.
 
-**Honest evaluation plan:** ~20+ labeled questions, scored by *executing* the generated SQL and comparing results to hand-written reference SQL — not by eyeballing. This needs a real LLM API key, so you run it and the README records the actual number.
+**Not claimed:** that this is perfectly secure. `sqlparse` is lexical, not a full parser, which is exactly why layer 3 exists and does not depend on layer 2 being bug-free; this has not been independently red-teamed by anyone but the person who wrote the validator (see `docs/NL_SQL_SECURITY.md` for the full honest limitations list).
+
+**Evaluation:** `scripts/evaluate_nl_sql.py` scores correctness by *executing* the LLM's generated SQL and the hand-written reference SQL for 20 labeled questions (`evaluation/nl_sql_questions.jsonl`) and comparing results, not SQL text. The harness itself is sanity-tested (`tests/test_evaluate_nl_sql.py`): feeding it a fake "LLM" that always returns the reference SQL scores 100%, and a deliberately wrong query scores 0% — proving the comparison logic is correct. It has not yet been run against a real LLM (this build environment has no `LLM_API_KEY`); running `python -m scripts.evaluate_nl_sql` with a real key produces the actual correctness number, written to `evaluation/results.json`.
 
 ## 8. What has and hasn't been verified
 
-**Verified (real PostgreSQL 16, not mocks):** 94 automated tests pass — 36 ETL validation, 16 ETL↔database integration, 14 API/analytics, 28 forecasting. Tests refuse to run against any database whose name doesn't end in `_test`.
+**Verified (real PostgreSQL 16, not mocks): 209 automated tests pass**, including:
+- 36 ETL validation + 16 ETL↔database integration tests
+- 17 API tests (14 analytics, 3 forecast)
+- 28 forecasting tests (features, chronological split, baselines, metric reproducibility)
+- 57 NL-to-SQL validator tests (every destructive statement type, dangerous functions, non-whitelisted tables, comment tricks, missing/oversized `LIMIT`)
+- 5 executor tests, including the permission-denied and timeout paths against the real role
+- 13 LLM-client tests (fence-stripping, error handling — no network call) + 4 prompt-builder tests
+- 14 `/query` API integration tests (success + audit log, rejection + audit log, LLM failure, API key, rate limiting)
+- 3 evaluation-harness sanity tests
+- 10 security unit tests (rate limiter, API key) + 6 config tests
+
+Tests refuse to run against any database whose name doesn't end in `_test`, so integration tests can never touch the demo/real database by mistake.
 
 **Not yet verified:**
-* No live LLM has been called (no API key in the build environment); Phase 4 tests will use a fake LLM client, and real correctness must be measured by you.
-* All data is synthetic. The pipeline accepts common real-world column names (`date`, `product`, `quantity`, …) so a public dataset can be swapped in, but that has not been exercised.
-* Nothing is deployed yet.
+* No live LLM has been called (no API key in the build environment) — `/query` and the evaluation harness were tested with a `FakeLLMClient` standing in for the model; the real NL-to-SQL correctness rate must be measured by you with a real key.
+* All data is synthetic. The ETL requires five exact column names (`sale_date`, `item_name`, `category`, `units_sold`, `revenue`) — it does **not** auto-detect real-world column-name variants; a real dataset needs renaming/aggregating first (see `data/README.md`).
+* The Dockerfile/docker-compose were written and reviewed carefully (paths, non-root user, healthcheck, volumes all checked against the actual code) but **not build-tested** — this sandbox has no Docker daemon. Run `docker compose build` yourself and treat the first run as the real test.
+* Nothing is deployed to a public URL.
 
-**Known limitations to state in a viva:** DD/MM/YYYY dates assume day-first; Linear Regression cannot model promotions or holidays; the forecast is per item with no cross-item learning; `sqlparse` is a lexical tool, not a full SQL parser.
+**Known limitations to state in a viva:** DD/MM/YYYY dates assume day-first; Linear Regression cannot model promotions or holidays; the forecast is per item with no cross-item learning; `sqlparse` is a lexical tool, not a full SQL parser; the rate limiter is a single-process in-memory counter (would need Redis behind multiple replicas); missing days are gap-filled by interpolation for lag features, which slightly overstates demand for very slow-moving items.
 
 ## 9. Repository layout
 
 ```
-app/            FastAPI app: main.py, config.py, db.py, models.py
-  routers/      analytics.py, forecast.py  (nl_query.py in Phase 4)
+app/            FastAPI app: main.py, config.py, db.py, models.py, security.py
+  routers/      analytics.py, forecast.py, nl_query.py
   forecasting/  data.py, features.py, metrics.py, train.py, predict.py
-  nl_sql/       prompt.py, validator.py  (Phase 4)
+  nl_sql/       prompt.py, validator.py, llm_client.py, executor.py
 etl/            extract.py, clean.py, transform.py, load.py, pipeline.py
 db/             schema.sql, readonly_grants.sql
-scripts/        init_db.py, generate_sample_data.py
+scripts/        init_db.py, generate_sample_data.py, evaluate_nl_sql.py, make_report_figures.py
 data/raw/       sample dataset + ground-truth manifest
+evaluation/     nl_sql_questions.jsonl (20 labeled questions)
 artifacts/      metrics.json (evidence); models/ is regenerable and git-ignored
-tests/          94 tests
+docs/           ARCHITECTURE.md, NL_SQL_SECURITY.md, img/forecast_vs_actual.png
+Dockerfile, docker-compose.yml, .dockerignore, LICENSE
+tests/          209 tests
 ```

@@ -1,0 +1,56 @@
+# Local/demo deployment. Brings up PostgreSQL and the RetailPulse API.
+#
+# First run (creates roles/schema, generates+loads sample data, trains the forecast model):
+#   docker compose up -d db
+#   docker compose run --rm app python -m scripts.init_db
+#   docker compose run --rm app python -m scripts.generate_sample_data
+#   docker compose run --rm app python -m etl.pipeline --input data/raw/sales_raw.csv --json
+#   docker compose run --rm app python -m app.forecasting.train
+#   docker compose up -d app
+#
+# Then: http://localhost:8000/docs
+#
+# This is a single-instance demo setup, matching what the project actually claims to be
+# (see README.md "Honest limitations") -- not a production Kubernetes/HA deployment.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: retailpulse
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-retailpulse_dev_password}
+      POSTGRES_DB: retailpulse
+    ports:
+      - "5432:5432"
+    volumes:
+      - retailpulse_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U retailpulse -d retailpulse"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://retailpulse:${POSTGRES_PASSWORD:-retailpulse_dev_password}@db:5432/retailpulse
+      READONLY_DATABASE_URL: postgresql://retailpulse_readonly:${READONLY_PASSWORD:-readonly_dev_password}@db:5432/retailpulse
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.groq.com/openai/v1}
+      LLM_MODEL: ${LLM_MODEL:-llama-3.3-70b-versatile}
+      API_KEY: ${API_KEY:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      # Sample data and generated artifacts persist across `docker compose run` one-off commands
+      # and the long-running app container, without being baked into the image itself.
+      - retailpulse_data:/srv/data
+      - retailpulse_artifacts:/srv/artifacts
+
+volumes:
+  retailpulse_pgdata:
+  retailpulse_data:
+  retailpulse_artifacts:
