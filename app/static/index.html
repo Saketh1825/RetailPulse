@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RetailPulse — Retail Data Intelligence</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232f5bea'/%3E%3Ctext x='32' y='43' font-family='system-ui,sans-serif' font-size='28' font-weight='700' fill='white' text-anchor='middle'%3ERP%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">RP</span>
+      <div>
+        <h1>RetailPulse</h1>
+        <p>Retail data pipeline &amp; demand intelligence</p>
+      </div>
+    </div>
+    <div class="status" id="status" aria-live="polite">
+      <span class="pill" id="pill-db">database …</span>
+      <span class="pill" id="pill-ro">read-only role …</span>
+      <span class="pill" id="pill-llm">LLM …</span>
+      <a class="docs-link" href="/docs" target="_blank" rel="noopener">API docs ↗</a>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="Dashboard sections">
+    <button role="tab" aria-selected="true"  data-tab="overview">Overview</button>
+    <button role="tab" aria-selected="false" data-tab="forecast">Demand Forecast</button>
+    <button role="tab" aria-selected="false" data-tab="ask">Ask a Question</button>
+    <button role="tab" aria-selected="false" data-tab="security">Security Lab</button>
+    <button role="tab" aria-selected="false" data-tab="quality">Data Quality</button>
+  </nav>
+
+  <main>
+    <!-- OVERVIEW ------------------------------------------------------------------------------ -->
+    <section id="tab-overview" class="panel" role="tabpanel">
+      <div class="kpis" id="kpis"></div>
+      <div class="grid two">
+        <div class="card">
+          <div class="card-head">
+            <h2>Top items</h2>
+            <div class="seg" id="metric-toggle">
+              <button class="active" data-metric="revenue">Revenue</button>
+              <button data-metric="units">Units</button>
+            </div>
+          </div>
+          <div class="chart-box"><canvas id="chart-top"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Revenue by category</h2></div>
+          <div class="chart-box"><canvas id="chart-category"></canvas></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Monthly revenue</h2><span class="hint">line = revenue, tooltip shows month-over-month change</span></div>
+        <div class="chart-box tall"><canvas id="chart-monthly"></canvas></div>
+      </div>
+    </section>
+
+    <!-- FORECAST ------------------------------------------------------------------------------ -->
+    <section id="tab-forecast" class="panel" role="tabpanel" hidden>
+      <div class="card">
+        <div class="card-head">
+          <h2>Per-item demand forecast</h2>
+          <label class="inline">Item
+            <select id="item-select"></select>
+          </label>
+        </div>
+        <div id="forecast-msg" class="notice" hidden></div>
+        <div class="chart-box tall"><canvas id="chart-forecast"></canvas></div>
+      </div>
+      <div class="grid two" id="forecast-details" hidden>
+        <div class="card">
+          <h2>Model evaluation <span class="hint">chronological holdout, never a random split</span></h2>
+          <div class="kpis small" id="model-kpis"></div>
+          <p class="fine" id="model-periods"></p>
+        </div>
+        <div class="card">
+          <h2>How to read this</h2>
+          <ul class="plain">
+            <li>Blue is real recent sales; the dashed line is the model's next 28 days.</li>
+            <li><b>MAE</b> is the average miss in units per day; <b>WAPE</b> is that miss as a share of demand.</li>
+            <li>The model is only meaningful if it beats the two naive baselines shown — that check is part of the evaluation.</li>
+          </ul>
+          <p class="caveat" id="forecast-caveat"></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ASK ----------------------------------------------------------------------------------- -->
+    <section id="tab-ask" class="panel" role="tabpanel" hidden>
+      <div class="card">
+        <h2>Ask the data in plain English</h2>
+        <p class="fine">Your question is turned into SQL by one LLM call, then independently validated and run on a database role that cannot write. Nothing here can modify data.</p>
+        <textarea id="q-input" rows="2" maxlength="300" placeholder="e.g. Which 5 items had the highest revenue in 2023?"></textarea>
+        <div class="row">
+          <button class="primary" id="q-run">Run query</button>
+          <input id="api-key" type="password" placeholder="X-API-Key (only if the server requires one)" autocomplete="off">
+        </div>
+        <div class="chips" id="q-chips"></div>
+      </div>
+      <div id="q-msg" class="notice" hidden></div>
+      <div id="q-result" hidden>
+        <div class="card">
+          <div class="card-head"><h2>SQL that actually ran</h2><span class="hint" id="q-timings"></span></div>
+          <pre class="code" id="q-sql"></pre>
+          <p class="fine" id="q-limit-hint"></p>
+          <ul class="plain" id="q-notes"></ul>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Result</h2><span class="hint" id="q-count"></span></div>
+          <div class="table-wrap"><table id="q-table"></table></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECURITY LAB -------------------------------------------------------------------------- -->
+    <section id="tab-security" class="panel" role="tabpanel" hidden>
+      <div class="card">
+        <h2>Four independent layers between a question and the data</h2>
+        <ol class="layers">
+          <li><b>Constrained prompt</b><span>exact schema, "one SELECT only" — reduces bad output, but is <i>not</i> a security control</span></li>
+          <li><b>Independent validator</b><span>SELECT-only · table whitelist · no comments / dangerous functions · forced LIMIT · fails closed</span></li>
+          <li><b>Read-only database role</b><span>enforced by PostgreSQL itself — writes are refused even if layers 1–2 were bypassed</span></li>
+          <li><b>Resource limits</b><span>statement timeout · row cap · rate limit · optional API key</span></li>
+        </ol>
+      </div>
+      <div class="card">
+        <h2>Try to break the validator</h2>
+        <p class="fine">This runs <b>only layer 2</b> against whatever SQL you type and shows its verdict. It never executes anything and never touches the database.</p>
+        <textarea id="v-input" rows="3" spellcheck="false" placeholder="Type any SQL…"></textarea>
+        <div class="row"><button class="primary" id="v-run">Check with validator</button></div>
+        <div class="chips" id="v-chips"></div>
+        <div id="v-result" class="verdict" hidden></div>
+      </div>
+      <div class="card">
+        <h2>Why layer 3 doesn't trust layer 2</h2>
+        <p class="fine">The validator is a lexical check, not a formally verified SQL parser, so it is not assumed to be perfect. The test suite therefore also connects to PostgreSQL <i>directly as the read-only role</i>, with no application code in between, and confirms a raw <code>DELETE</code> is refused by the database and <code>pg_sleep(2)</code> is cancelled by the timeout.</p>
+      </div>
+    </section>
+
+    <!-- DATA QUALITY -------------------------------------------------------------------------- -->
+    <section id="tab-quality" class="panel" role="tabpanel" hidden>
+      <div class="kpis" id="dq-kpis"></div>
+      <div class="grid two">
+        <div class="card"><div class="card-head"><h2>Why rows were rejected</h2></div><div class="chart-box"><canvas id="chart-rejects"></canvas></div></div>
+        <div class="card"><div class="card-head"><h2>What was repaired instead</h2></div><div class="chart-box"><canvas id="chart-repairs"></canvas></div></div>
+      </div>
+      <p class="fine center" id="dq-source"></p>
+    </section>
+  </main>
+
+  <footer>RetailPulse · FastAPI · PostgreSQL · scikit-learn · every number on this page comes from the live API</footer>
+
+  <script src="/static/vendor/chart.umd.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

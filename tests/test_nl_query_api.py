@@ -167,3 +167,49 @@ def test_readonly_role_enforces_statement_timeout_even_with_no_validator_involve
         conn.execute("SET statement_timeout = '200ms'")
         with pytest.raises(psycopg.errors.QueryCanceled):
             conn.execute("SELECT pg_sleep(2)")
+
+
+# ---- POST /query/validate: the validator's verdict, with nothing executed ------------------------
+def _audit_count(loaded_db) -> int:
+    with psycopg.connect(loaded_db["dsn"]) as conn:
+        return conn.execute("SELECT count(*) FROM nl_query_log").fetchone()[0]
+
+
+def test_validate_accepts_safe_select_and_reports_rewrite(client, loaded_db):
+    body = client.post("/query/validate", json={"sql": "SELECT name FROM items"}).json()
+    assert body["ok"] is True
+    assert "LIMIT" in body["rewritten_sql"] and body["limit_applied"] >= 1
+    assert body["reject_reason"] is None
+
+
+@pytest.mark.parametrize("sql,reason", [
+    ("DROP TABLE items", "not_a_select"),
+    ("SELECT * FROM pg_shadow", "non_whitelisted_table"),
+    ("SELECT pg_sleep(5)", "dangerous_function"),
+    ("SELECT 1; DELETE FROM sales", "multiple_statements"),
+])
+def test_validate_rejects_attacks_with_exact_reason(client, loaded_db, sql, reason):
+    body = client.post("/query/validate", json={"sql": sql}).json()
+    assert body["ok"] is False and body["reject_reason"] == reason and body["detail"]
+    assert body["rewritten_sql"] is None
+
+
+def test_validate_never_touches_the_database_or_audit_log(client, loaded_db):
+    before = _audit_count(loaded_db)
+    client.post("/query/validate", json={"sql": "SELECT name FROM items"})
+    client.post("/query/validate", json={"sql": "DROP TABLE items"})
+    assert _audit_count(loaded_db) == before
+    with psycopg.connect(loaded_db["dsn"]) as conn:  # and the table it "was asked" to drop still exists
+        assert conn.execute("SELECT count(*) FROM items").fetchone()[0] > 0
+
+
+def test_validate_respects_api_key(loaded_db, monkeypatch):
+    from app.config import get_settings
+    monkeypatch.setenv("API_KEY", "s3cret")
+    get_settings.cache_clear()
+    from app.main import create_app
+    with TestClient(create_app()) as c:
+        assert c.post("/query/validate", json={"sql": "SELECT 1"}).status_code == 401
+        assert c.post("/query/validate", json={"sql": "SELECT 1"}, headers={"X-API-Key": "s3cret"}).status_code == 200
+    monkeypatch.delenv("API_KEY", raising=False)
+    get_settings.cache_clear()

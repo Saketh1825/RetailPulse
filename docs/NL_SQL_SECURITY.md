@@ -51,21 +51,44 @@ layer is purely a quality/cost measure; treat everything past this point as untr
 
 ### Layer 2 — Independent validator (`app/nl_sql/validator.py`)
 
-Runs on every LLM response regardless of what the prompt asked for. Fails closed: anything it can't
-confidently classify as safe is rejected, not passed through. In order:
+Runs on every LLM response regardless of what the prompt asked for. **Deny by default**: anything it
+cannot positively classify as a plain analytic `SELECT` is rejected, not passed through on a best
+effort basis. The first version of this validator used two blocklists (dangerous keywords, dangerous
+functions) checked against `sqlparse`'s token stream. Self-review found three ways that shape of
+check could plausibly be wrong — a blocklist is only as good as the list — so it was rewritten around
+allow lists and a single normalization pass instead:
 
-| # | Check | Rejects |
-|---|---|---|
-| 1 | Length cap | absurdly long generated SQL |
-| 2 | Non-empty | the model returned nothing |
-| 3 | Single statement | `SELECT 1; DROP TABLE items` — stacked queries |
-| 4 | `SELECT`/CTE only | `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`, `TRUNCATE`, `GRANT`, `COPY`, ... |
-| 5 | No comments | `--` or `/* */`, which can hide a second statement from a naive check |
-| 6 | No `SELECT ... INTO` | would silently create a table |
-| 7 | Dangerous-function blocklist | `pg_sleep`, `pg_read_file`, `dblink`, `lo_import`, `pg_terminate_backend`, `xp_cmdshell`, ... |
-| 8 | No comma-joins | old-style `FROM a, b` is rejected wholesale rather than risk missing a table in that form |
-| 9 | Table whitelist | only `items`, `sales`, `forecasts` (and CTE names the query defines itself); any schema-qualified name outside `public` |
-| 10 | No `OFFSET` | pagination is out of scope for v1 |
+1. **One tokenization pass, before any other check.** Every string literal and quoted identifier is
+   replaced with a placeholder *first*, so nothing downstream can mistake text inside a string for
+   code (e.g. a table name hidden inside `'...'`) or vice versa. Any syntax whose meaning this
+   checker and PostgreSQL could disagree about — backslash escapes, dollar-quoting, stray control
+   characters, unterminated quotes, non-ASCII outside a quoted string — is rejected outright rather
+   than guessed at.
+2. **Functions are an allowlist, not a blocklist.** Only ~60 pure analytic functions (aggregates,
+   window functions, math, string, date/time, casts) may be called. `pg_sleep`, `dblink`,
+   `current_setting`, and anything else not on the list — including functions that don't exist yet —
+   are rejected the same way, with no list to keep up to date against new attacks.
+3. **Forbidden keywords are checked anywhere in the query, not just at the start.** This specifically
+   closes `WITH d AS (DELETE FROM sales RETURNING *) SELECT * FROM d` — a write hidden inside a CTE,
+   which a start-of-statement check alone would miss.
+4. **Every table reference is resolved and checked**, including inside CTEs and subqueries; a target
+   this checker cannot positively classify (a parenthesised join, an unrecognized `FROM` clause) is
+   rejected rather than skipped.
+
+| Rejection reason | Catches |
+|---|---|
+| `sql_too_long` / `empty_query` | absurd length / nothing returned |
+| `unsupported_syntax` / `unbalanced_quotes` | ambiguous tokenization (see above) |
+| `multiple_statements` | `SELECT 1; DROP TABLE items` — stacked queries |
+| `not_a_select` | `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`, `TRUNCATE`, `GRANT`, ... |
+| `contains_comment` | `--` or `/* */` outside a string literal |
+| `select_into` | would silently create a table |
+| `dangerous_function` | a specifically-named known attack (`pg_sleep`, `dblink`, ...) gets a precise message |
+| `comma_join_not_supported` | old-style `FROM a, b` — rejected wholesale rather than risk missing a table in that form |
+| `non_whitelisted_table` / `unrecognized_from_clause` | only `items`, `sales`, `forecasts`, or a CTE the query defines itself |
+| `forbidden_keyword` | a write/DDL/session keyword anywhere in the query, including inside a CTE |
+| `function_not_allowed` | any function call not on the allowlist |
+| `offset_not_supported` | pagination is out of scope for v1 |
 
 On success: a missing `LIMIT` is added; an existing one above the cap (`NL_MAX_ROWS`, default 200) is
 reduced. The query is silently rewritten to request one extra row so the API can report `truncated`
@@ -73,11 +96,12 @@ without a second round trip.
 
 **What this buys you:** every rejection reason is exact and independently unit-tested (57 adversarial
 cases in `tests/test_nl_validator.py` — valid queries, every destructive statement type, dangerous
-functions, non-whitelisted tables, comment-based tricks, missing/oversized `LIMIT`, gibberish, and
-oversized input).
-**What this does NOT buy you:** `sqlparse` is lexical, not a full grammar-aware parser. An
-adversarial input crafted specifically around its parsing quirks is not provably impossible to slip
-through. That is exactly why layer 3 exists and does not depend on layer 2 being perfect.
+functions, a write hidden inside a CTE, non-whitelisted tables, comment-based tricks, unbalanced
+quotes, missing/oversized `LIMIT`, gibberish, and oversized input). `POST /query/validate` runs this
+layer alone, on any SQL you give it, with nothing executed — useful for demoing or probing it directly.
+**What this does NOT buy you:** `sqlparse`/regex-based analysis is lexical, not a full grammar-aware
+parser, and a deny-by-default design only closes the gaps its author thought to test for — it is not
+a formal proof. That is exactly why layer 3 exists and does not depend on layer 2 being perfect.
 
 ### Layer 3 — Database-enforced read-only role (`db/readonly_grants.sql`)
 
@@ -141,6 +165,9 @@ just "the API returned an error" but "the *reason* recorded matches the *actual*
 - Prompt-injection via data the LLM reads back is out of scope today because this feature's LLM
   call never sees query results — only the question and the fixed schema. That would change if a
   future version summarized results with a second LLM call.
-- This has not yet been red-teamed by anyone other than the person who wrote the validator. The
-  adversarial test suite covers every attack class the author thought of, which is a real form of
-  evidence, but not the same as an independent security review.
+- This has been self-red-teamed — the author deliberately tried to break their own earlier
+  (blocklist-based) version, found concrete gaps (a write hidden inside a CTE; functions a blocklist
+  simply hadn't named), and rewrote layer 2 around allow lists specifically to close that *class* of
+  gap rather than patch individual cases. That is real, but it is still one person's adversarial
+  thinking, not an independent third-party security review or a formal verification. Treat the
+  current validator as meaningfully hardened, not as proven correct.

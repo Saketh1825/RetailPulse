@@ -1,0 +1,57 @@
+name: tests
+
+# Runs the real test suite against a real PostgreSQL service container -- not mocks. This is the
+# same test suite described in README.md; a passing run here is the actual evidence behind the
+# "209+ tests passing" claim, not just a local assertion.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: retailpulse
+          POSTGRES_PASSWORD: retailpulse
+          POSTGRES_DB: retailpulse_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U retailpulse -d retailpulse_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Wait for PostgreSQL
+        run: |
+          for i in $(seq 1 20); do
+            pg_isready -h localhost -U retailpulse -d retailpulse_test && break
+            sleep 1
+          done
+        env:
+          PGPASSWORD: retailpulse
+
+      - name: Run test suite (unit + integration)
+        run: pytest -v
+        env:
+          # Matches tests/conftest.py's defaults exactly -- no other configuration needed.
+          TEST_DATABASE_URL: postgresql://retailpulse:retailpulse@localhost:5432/retailpulse_test
+
+      - name: Security-relevant lint (bandit-style rules)
+        run: ruff check app/ etl/ scripts/ tests/ --select S

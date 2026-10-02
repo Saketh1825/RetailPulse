@@ -82,6 +82,22 @@ And what happens when the model is asked (or tricked into trying) to destroy dat
 { "error": { "code": "http_error", "message": "query rejected: only SELECT is allowed, got statement type 'DELETE'" } }
 ```
 
+## Dashboard
+
+A live dashboard ships with the app itself (`app/static/`, plain HTML/CSS/JS, no build step, no framework) -- open `http://localhost:8000/` once the server is running. Every number on it comes from the real API, not fixtures.
+
+![RetailPulse dashboard overview: revenue, units, top items, revenue by category, and a monthly revenue trend, all live from the API](docs/img/dashboard_overview.png)
+
+The **Security Lab** tab is the best part to show someone: one-click attack buttons (`DROP TABLE`, a write hidden inside a CTE, `pg_sleep`, reading `pg_shadow`) run against the real validator live, with nothing executed and nothing at risk.
+
+![RetailPulse Security Lab: clicking a canned DROP TABLE attack shows the validator's REJECTED verdict with the exact reason](docs/img/dashboard_security_lab.png)
+
+The **Demand Forecast** tab charts real recent sales against the actual trained model's forecast for any item, with its measured MAE/WAPE alongside the two baselines:
+
+![RetailPulse forecast tab: actual sales history and the Linear Regression forecast for one item, with MAE/WAPE and baseline comparison](docs/img/dashboard_forecast.png)
+
+`Ask a Question` and `Data Quality` tabs round it out -- the former shows a clear, honest message rather than a broken-looking error when no LLM key is configured. Verified end-to-end with a real browser (Playwright/Chromium): zero JavaScript errors across every tab, including live interaction with each one.
+
 ## Architecture
 
 ```mermaid
@@ -140,6 +156,7 @@ All endpoints return JSON; errors use one envelope: `{"error": {"code", "message
 | GET | `/data-quality/latest` | What the last ETL run rejected and repaired, and why |
 | GET | `/forecast/{item_id}` | Forecast + holdout accuracy + baseline comparison for one item |
 | POST | `/query` | Natural-language question -> validated, read-only SQL result |
+| POST | `/query/validate` | Run only the SQL validator on any query and see its verdict -- executes nothing, touches no database |
 
 Interactive docs (Swagger UI) are served at `/docs` once the app is running.
 
@@ -183,15 +200,15 @@ docker compose up -d app       # -> http://localhost:8000/docs
 ## Testing
 
 ```bash
-pytest              # 209 tests: unit tests always run; integration tests need a reachable PostgreSQL
+pytest              # 219 tests: unit tests always run; integration tests need a reachable PostgreSQL
 ```
 
 - **36** ETL validation + **16** ETL<->PostgreSQL integration tests -- including the strongest check in the suite: the sample-data generator records exactly how many rows of each defect it injected, and the test asserts the ETL's rejection and repair counts match that ground truth *exactly*, reason by reason
-- **17** API tests (analytics + forecast), **28** forecasting tests (features, chronological split, baselines, metric reproducibility)
-- **57** NL-to-SQL validator tests -- every destructive statement type, dangerous functions, non-whitelisted tables, comment-based tricks, missing/oversized `LIMIT`, gibberish input
+- **20** API tests (17 analytics, 3 forecast), **28** forecasting tests (features, chronological split, baselines, metric reproducibility)
+- **57** NL-to-SQL validator tests -- every destructive statement type, a write hidden inside a CTE, dangerous functions, non-whitelisted tables, comment-based tricks, unbalanced quotes, missing/oversized `LIMIT`, gibberish input
 - **5** executor tests, including the permission-denied and timeout paths run against the *real* read-only role
 - **17** LLM-client + prompt-builder tests (no network call -- response parsing and error handling only)
-- **14** `/query` API integration tests: success + audit log, rejection + audit log, LLM failure, API key enforcement, rate limiting, **and two tests that bypass the app entirely** to prove the database itself refuses writes and enforces the timeout
+- **21** `/query` + `/query/validate` API integration tests: success + audit log, rejection + audit log, LLM failure, API key enforcement, rate limiting, **and two tests that bypass the app entirely** to prove the database itself refuses writes and enforces the timeout
 - **3** evaluation-harness sanity tests, **16** security/config unit tests
 
 Integration tests run only against a database whose name ends in `_test` (a safety check in `tests/conftest.py`), so they can never touch a real/demo database by mistake. They're skipped, not failed, when no PostgreSQL is reachable.
@@ -201,7 +218,7 @@ Integration tests run only against a database whose name ends in `_test` (a safe
 - The sample dataset is **synthetic**, generated with known weekly/yearly seasonality -- the forecast numbers above prove the training-and-evaluation *pipeline* is correct, not that this accuracy holds on real retail data.
 - Linear Regression cannot model promotions, stock-outs, price changes, or one-off events -- see the `caveat` field the API returns with every forecast.
 - The NL-to-SQL feature has not been evaluated against a real LLM -- the validator, executor, and API are fully tested with a `FakeLLMClient` standing in for the model, but the actual correctness rate (via `python -m scripts.evaluate_nl_sql` on the 20 labeled questions in `evaluation/`) needs your API key to produce a real number.
-- `sqlparse` is a lexical tool, not a full SQL parser -- the validator is a defensible, tested, fail-closed check, not a formally verified one. That's exactly why the database-level read-only role exists as an independent backstop.
+- The validator is a defensible, tested, deny-by-default lexical check (allowlisted functions, not a blocklist), not a formally verified SQL parser. It has been self-red-teamed -- a gap found in an earlier version (a write hidden inside a CTE) was closed by rewriting around allow lists -- but that's one author's adversarial testing, not independent review. That's exactly why the database-level read-only role exists as an independent backstop.
 - The rate limiter is a single-process in-memory counter -- correct for the single-instance deployment this project targets, but would need a shared store (e.g. Redis) behind more than one worker or replica.
 - Docker is written and reviewed but not build-tested (no Docker daemon in the build environment).
 
@@ -213,10 +230,12 @@ Full limitations and the phase-by-phase validation gates are in [`docs/ARCHITECT
 - [x] Phase 5 -- Hardening: optional API key, rate limiting, full query audit log
 - [x] Phase 6 -- Evaluation harness for 20 labeled NL-to-SQL questions (sanity-tested; needs your LLM key for a real score)
 - [x] Phase 7 -- Dockerfile + docker-compose (written, reviewed, not build-tested -- no Docker in the build sandbox)
-- [x] Phase 8 -- README, real forecast-vs-actual figure, ER diagram, NL-to-SQL security design doc
+- [x] Phase 8 -- README, real forecast-vs-actual figure, ER diagram, NL-to-SQL security design doc, live dashboard
 - [x] Phase 9 -- Resume bullets and interview prep (see [`docs/RESUME_AND_INTERVIEW.md`](docs/RESUME_AND_INTERVIEW.md))
+- [x] CI: GitHub Actions runs the full suite against a real PostgreSQL service container on every push
 - [ ] Run `python -m scripts.evaluate_nl_sql` with a real `LLM_API_KEY` and record the actual correctness rate here
 - [ ] Build-test the Docker image and deploy to a public URL
+- [ ] A written project report / viva slide deck, if your program requires one separately from the working code
 
 ## Project layout
 
@@ -225,6 +244,7 @@ app/            FastAPI app: main.py, config.py, db.py, models.py, security.py
   routers/      analytics.py, forecast.py, nl_query.py
   forecasting/  data.py, features.py, metrics.py, train.py, predict.py
   nl_sql/       prompt.py, validator.py, llm_client.py, executor.py
+  static/       live dashboard: index.html, css/, js/app.js, vendor/chart.umd.js (no build step)
 etl/            extract.py, clean.py, transform.py, load.py, pipeline.py
 db/             schema.sql, readonly_grants.sql
 scripts/        init_db.py, generate_sample_data.py, evaluate_nl_sql.py, make_report_figures.py
@@ -232,8 +252,9 @@ data/raw/       sample dataset + ground-truth manifest
 evaluation/     nl_sql_questions.jsonl (20 labeled questions)
 artifacts/      metrics.json (kept as evidence); models/ is regenerable, git-ignored
 docs/           ARCHITECTURE.md, NL_SQL_SECURITY.md, RESUME_AND_INTERVIEW.md, img/
+.github/workflows/tests.yml  CI
 Dockerfile, docker-compose.yml, .dockerignore, LICENSE
-tests/          209 tests
+tests/          219 tests
 ```
 
 ## Tech stack

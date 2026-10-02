@@ -21,7 +21,7 @@ from psycopg import Connection
 
 from app.config import Settings, get_settings
 from app.db import get_ro_conn
-from app.models import QueryRequest, QueryResponse, QueryTimings
+from app.models import QueryRequest, QueryResponse, QueryTimings, ValidateRequest, ValidateResponse
 from app.nl_sql.executor import ExecutionError, execute_readonly
 from app.nl_sql.llm_client import LLMClient, LLMError
 from app.nl_sql.prompt import build_messages
@@ -131,3 +131,29 @@ def run_query(
             notes=validation.notes)
     finally:
         request.app.state.rw_pool.putconn(rw_conn)
+
+
+@router.post("/query/validate", response_model=ValidateResponse,
+             summary="Show the SQL validator's verdict on any SQL. Never executes anything.")
+def validate_only(
+    body: ValidateRequest,
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+    x_api_key: Annotated[str | None, Header()] = None,
+):
+    """Security-lab endpoint: runs ONLY layer 2 (the validator) on caller-supplied SQL and reports the
+    verdict. It touches neither the LLM nor the database, so it costs nothing and cannot change data --
+    which makes it safe to expose, and a live way to demonstrate exactly what gets rejected and why."""
+    if not check_api_key(settings.api_key.get_secret_value() if settings.api_key else None, x_api_key):
+        raise HTTPException(401, "missing or invalid X-API-Key")
+    client_key = "validate:" + (request.client.host if request.client else "unknown")
+    try:
+        request.app.state.query_rate_limiter.check(client_key)
+    except RateLimitExceeded as exc:
+        raise HTTPException(429, f"rate limit exceeded; retry after {exc.retry_after_seconds}s") from exc
+
+    result = validate_and_limit(body.sql, settings.nl_max_rows)
+    if result.ok:
+        return ValidateResponse(ok=True, rewritten_sql=result.sql, limit_applied=result.limit_applied,
+                                notes=result.notes)
+    return ValidateResponse(ok=False, reject_reason=result.reject_reason, detail=result.reject_detail)

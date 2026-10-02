@@ -135,7 +135,7 @@ One LLM call per question, no framework, no agents. Four independent layers — 
 | Layer | Where | What it stops |
 |---|---|---|
 | 1. Constrained prompt | `app/nl_sql/prompt.py` | Gives the model the exact schema and "output one SELECT only" — reduces bad output, **not** a security control |
-| 2. Validator | `app/nl_sql/validator.py` | Parses with `sqlparse`; rejects anything that isn't a single SELECT/WITH-SELECT, any non-whitelisted table, system catalogs, dangerous functions (`pg_sleep`, `pg_read_file`, `dblink`, …), comments, comma-joins and multiple statements; forces a `LIMIT` cap |
+| 2. Validator | `app/nl_sql/validator.py` | Deny-by-default: one normalization pass (strings/identifiers replaced before any analysis), a function **allowlist** (not a blocklist), forbidden keywords checked anywhere including inside CTEs, every table reference resolved against the whitelist, comments/comma-joins/multiple statements rejected; forces a `LIMIT` cap. `POST /query/validate` runs this layer alone for live demos. |
 | 3. Read-only DB role | Postgres | Refuses any write/DDL regardless of app bugs; also `default_transaction_read_only` |
 | 4. Resource limits | Postgres + app | `statement_timeout` (5s) and `idle_in_transaction_session_timeout`, both set at the role level; row cap; question length cap; rate limit; optional API key |
 
@@ -143,20 +143,20 @@ One LLM call per question, no framework, no agents. Four independent layers — 
 
 The endpoint (`POST /query`, `app/routers/nl_query.py`) wires prompt → LLM client → validator → executor → response, and writes every attempt (accepted, rejected, LLM error, or execution error) to `nl_query_log` via the normal read/write role, whether or not it succeeded.
 
-**Not claimed:** that this is perfectly secure. `sqlparse` is lexical, not a full parser, which is exactly why layer 3 exists and does not depend on layer 2 being bug-free; this has not been independently red-teamed by anyone but the person who wrote the validator (see `docs/NL_SQL_SECURITY.md` for the full honest limitations list).
+**Not claimed:** that this is perfectly secure. The validator is lexical analysis, not a full grammar parser, which is exactly why layer 3 exists and does not depend on layer 2 being bug-free. It has been self-red-teamed — an earlier blocklist-based version was deliberately attacked, real gaps were found (a write hidden inside a CTE; functions a blocklist hadn't named), and layer 2 was rewritten around allow lists to close that *class* of gap — but that is one author's adversarial thinking, not an independent third-party review (see `docs/NL_SQL_SECURITY.md` for the full account).
 
 **Evaluation:** `scripts/evaluate_nl_sql.py` scores correctness by *executing* the LLM's generated SQL and the hand-written reference SQL for 20 labeled questions (`evaluation/nl_sql_questions.jsonl`) and comparing results, not SQL text. The harness itself is sanity-tested (`tests/test_evaluate_nl_sql.py`): feeding it a fake "LLM" that always returns the reference SQL scores 100%, and a deliberately wrong query scores 0% — proving the comparison logic is correct. It has not yet been run against a real LLM (this build environment has no `LLM_API_KEY`); running `python -m scripts.evaluate_nl_sql` with a real key produces the actual correctness number, written to `evaluation/results.json`.
 
 ## 8. What has and hasn't been verified
 
-**Verified (real PostgreSQL 16, not mocks): 209 automated tests pass**, including:
+**Verified (real PostgreSQL 16, not mocks): 219 automated tests pass**, including:
 - 36 ETL validation + 16 ETL↔database integration tests
-- 17 API tests (14 analytics, 3 forecast)
+- 20 API tests (17 analytics, 3 forecast)
 - 28 forecasting tests (features, chronological split, baselines, metric reproducibility)
-- 57 NL-to-SQL validator tests (every destructive statement type, dangerous functions, non-whitelisted tables, comment tricks, missing/oversized `LIMIT`)
+- 57 NL-to-SQL validator tests (every destructive statement type, a write hidden inside a CTE, dangerous functions, non-whitelisted tables, comment tricks, unbalanced quotes, missing/oversized `LIMIT`)
 - 5 executor tests, including the permission-denied and timeout paths against the real role
 - 13 LLM-client tests (fence-stripping, error handling — no network call) + 4 prompt-builder tests
-- 14 `/query` API integration tests (success + audit log, rejection + audit log, LLM failure, API key, rate limiting)
+- 21 `/query` + `/query/validate` API integration tests (success + audit log, rejection + audit log, LLM failure, API key, rate limiting)
 - 3 evaluation-harness sanity tests
 - 10 security unit tests (rate limiter, API key) + 6 config tests
 
@@ -180,10 +180,12 @@ app/            FastAPI app: main.py, config.py, db.py, models.py, security.py
 etl/            extract.py, clean.py, transform.py, load.py, pipeline.py
 db/             schema.sql, readonly_grants.sql
 scripts/        init_db.py, generate_sample_data.py, evaluate_nl_sql.py, make_report_figures.py
+app/static/     live dashboard: index.html, css/, js/app.js, vendor/chart.umd.js (no build step)
 data/raw/       sample dataset + ground-truth manifest
 evaluation/     nl_sql_questions.jsonl (20 labeled questions)
 artifacts/      metrics.json (evidence); models/ is regenerable and git-ignored
-docs/           ARCHITECTURE.md, NL_SQL_SECURITY.md, img/forecast_vs_actual.png
+docs/           ARCHITECTURE.md, NL_SQL_SECURITY.md, RESUME_AND_INTERVIEW.md, img/
+.github/workflows/tests.yml  CI: runs the full suite against a real PostgreSQL service container
 Dockerfile, docker-compose.yml, .dockerignore, LICENSE
-tests/          209 tests
+tests/          219 tests
 ```

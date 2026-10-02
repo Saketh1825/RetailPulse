@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import get_settings
@@ -100,6 +101,8 @@ def create_app() -> FastAPI:
     app.include_router(forecast.router)
     app.include_router(nl_query.router)
     if (STATIC / "index.html").exists():
+        app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
         @app.get("/", include_in_schema=False)
         def index():
             return FileResponse(STATIC / "index.html")

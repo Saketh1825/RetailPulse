@@ -8,11 +8,11 @@ from __future__ import annotations
 from datetime import date
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from psycopg import Connection
 
 from app.db import get_conn
-from app.models import CategoryRevenue, DataQualityRun, ItemOut, MonthlyRevenue, Summary, TopItem
+from app.models import CategoryRevenue, DataQualityRun, ItemOut, ItemSalesPoint, MonthlyRevenue, Summary, TopItem
 
 router = APIRouter(tags=["analytics"])
 Conn = Annotated[Connection, Depends(get_conn)]
@@ -103,6 +103,19 @@ def list_items(conn: Conn, category: Annotated[str | None, Query(max_length=60)]
     return conn.execute(
         "SELECT id, name, category FROM items WHERE (%(c)s::text IS NULL OR category = %(c)s) ORDER BY name",
         {"c": category}).fetchall()
+
+
+@router.get("/analytics/item-sales/{item_id}", response_model=list[ItemSalesPoint],
+            summary="Most recent daily sales records for one item (for charting actual-vs-forecast)")
+def item_sales(conn: Conn, item_id: Annotated[int, Path(ge=1)],
+                days: Annotated[int, Query(ge=1, le=730, description="How many of the most recent daily records to return")] = 90):
+    exists = conn.execute("SELECT 1 FROM items WHERE id = %s", (item_id,)).fetchone()
+    if exists is None:
+        raise HTTPException(404, f"item {item_id} not found")
+    rows = conn.execute(
+        "SELECT sale_date, units_sold, revenue FROM sales WHERE item_id = %s "
+        "ORDER BY sale_date DESC LIMIT %s", (item_id, days)).fetchall()
+    return list(reversed(rows))  # chronological order for charting
 
 
 @router.get("/data-quality/latest", response_model=DataQualityRun, summary="What the latest ETL run rejected and repaired")

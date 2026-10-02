@@ -93,3 +93,30 @@ def test_sql_injection_attempt_in_parameters_is_harmless(client, loaded_db):
 def test_unknown_route_uses_error_envelope(client):
     r = client.get("/nope")
     assert r.status_code == 404 and r.json()["error"]["code"] == "not_found"
+
+
+# ---- item-sales history endpoint (feeds the dashboard's actual-vs-forecast chart) ----------------
+def _first_item_id(loaded_db) -> int:
+    import psycopg
+    with psycopg.connect(loaded_db["dsn"]) as conn:
+        return conn.execute("SELECT id FROM items ORDER BY id LIMIT 1").fetchone()[0]
+
+
+def test_item_sales_returns_recent_rows_in_chronological_order(client, loaded_db):
+    item_id = _first_item_id(loaded_db)
+    body = client.get(f"/analytics/item-sales/{item_id}?days=30").json()
+    assert 0 < len(body) <= 30
+    dates = [r["sale_date"] for r in body]
+    assert dates == sorted(dates)
+    assert all(r["units_sold"] >= 0 and r["revenue"] >= 0 for r in body)
+
+
+def test_item_sales_unknown_item_is_404(client, loaded_db):
+    assert client.get("/analytics/item-sales/999999").status_code == 404
+
+
+def test_item_sales_validates_parameters(client, loaded_db):
+    item_id = _first_item_id(loaded_db)
+    assert client.get(f"/analytics/item-sales/{item_id}?days=0").status_code == 422
+    assert client.get(f"/analytics/item-sales/{item_id}?days=100000").status_code == 422
+    assert client.get("/analytics/item-sales/0").status_code == 422

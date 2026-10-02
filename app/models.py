@@ -54,6 +54,12 @@ class ItemOut(BaseModel):
     category: str
 
 
+class ItemSalesPoint(BaseModel):
+    sale_date: date
+    units_sold: int
+    revenue: float
+
+
 class DataQualityRun(BaseModel):
     run_id: int
     started_at: datetime
@@ -121,6 +127,19 @@ class QueryResponse(BaseModel):
     limit_applied: int
     timings: QueryTimings
     notes: list[str] = Field(default_factory=list, description="What the validator changed, if anything")
+
+
+class ValidateRequest(BaseModel):
+    sql: str = Field(..., min_length=1, max_length=10000, examples=["SELECT name FROM items LIMIT 5"])
+
+
+class ValidateResponse(BaseModel):
+    ok: bool
+    reject_reason: str | None = Field(None, description="Machine-readable rule that rejected the SQL")
+    detail: str | None = Field(None, description="Human-readable explanation of the rejection")
+    rewritten_sql: str | None = Field(None, description="The SQL that WOULD run (LIMIT enforced); never executed here")
+    limit_applied: int | None = None
+    notes: list[str] = Field(default_factory=list)
 
 
 class ErrorBody(BaseModel):
